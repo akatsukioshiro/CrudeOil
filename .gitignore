@@ -3,6 +3,9 @@ test_env_linux/
 test_env_win/
 env_linux/
 
+#imp files
+token
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
