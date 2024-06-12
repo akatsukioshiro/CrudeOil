@@ -12,6 +12,7 @@ on:
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
+    environment: pypi_upload
 
     steps:
     - name: Checkout repository
