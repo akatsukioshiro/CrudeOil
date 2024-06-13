@@ -6,8 +6,8 @@
     <title>Document</title>
     <link rel="stylesheet" type="text/css" href="/static/css/style.css">
     <style>
-        #events {
-            height: 300px;
+        .events {
+            height: 150px;
             overflow-y: scroll;
             border: 1px solid #ccc;
             padding: 10px;
@@ -16,45 +16,48 @@
 </head>
 <body>
     <h1>{{ greeting }}</h1>
-    <div id="events"></div>
+    <div class="events" id="events"></div>
+    <div class="events" id="events_cli"></div>
     <script>
-        // Now establish the EventSource connection
         const eventSource = new EventSource('http://localhost:9090/events');
+        const eventSource2 = new EventSource('http://localhost:9090/events_cli');
 
         eventSource.onmessage = function(event) {
-            const newElement = document.createElement('div');
-            newElement.textContent = 'Message: ' + event.data;
-            document.getElementById('events').appendChild(newElement);
-            // Auto-scroll to the bottom of the events div
-            document.getElementById('events').scrollTop = document.getElementById('events').scrollHeight;
-        };
+	    if (event.data === 'STOP') {
+                console.log('Received STOP message. Closing connection.');
+                eventSource.close();
+                return;
+            }
+	    else {
+                const newElement = document.createElement('div');
+                newElement.textContent = 'Message: ' + event.data;
+                document.getElementById('events').appendChild(newElement);
+                document.getElementById('events').scrollTop = document.getElementById('events').scrollHeight;
+            }
+	};
+
+        eventSource2.onmessage = function(event) {
+	    if (event.data === 'STOP') {
+                console.log('Received STOP message. Closing connection.');
+                eventSource2.close();
+                return;
+            }
+	    else {
+                const newElement = document.createElement('div');
+                newElement.textContent = 'Message: ' + event.data;
+                document.getElementById('events_cli').appendChild(newElement);
+                document.getElementById('events_cli').scrollTop = document.getElementById('events_cli').scrollHeight;
+            }
+	};
 
         eventSource.onerror = function() {
             console.error('EventSource failed.');
         };
 
-        async function initializeSSE() {
-            try {
-                // Establish an async connection to the events route
-                const response = await fetch('http://localhost:9090/events', {
-                    method: 'GET',
-                    headers: {
-                        'Accept': 'text/event-stream'
-                    }
-                });
+        eventSource2.onerror = function() {
+            console.error('EventSource failed.');
+        };
 
-                // Close the fetch connection
-                if (response.ok) {
-                    response.body.getReader().cancel();
-                }
-
-            } catch (error) {
-                console.error('Error establishing SSE:', error);
-            }
-        }
-
-        // Initialize the SSE connection
-        initializeSSE();
     </script>
 </body>
 </html>

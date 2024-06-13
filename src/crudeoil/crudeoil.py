@@ -1,5 +1,7 @@
 from crudeoil.static_vals import TheYuckStuff
 import socket
+import time
+import threading
 from datetime import datetime
 import signal
 import sys
@@ -12,6 +14,8 @@ class CrudeOil:
         #Whatever is empty stays here
         self.routes = {}
         self.route_methods = {}
+        self.sse_dict = {}
+        self.sse_methods = {}
 
         #Some important paths
         self.template_folder = self._determine_path(template_folder)
@@ -39,9 +43,22 @@ class CrudeOil:
 
     def route(self, path, methods=[]):
         def decorator(func):
-            self.routes[path] = func
-            self.route_methods[path] = methods
-            return func
+            if path not in self.routes and path not in self.sse_dict:
+                self.routes[path] = func
+                self.route_methods[path] = methods
+                return func
+            else:
+                raise ValueError("Duplicate Route")
+        return decorator
+
+    def sse(self, path, methods=[]):
+        def decorator(func):
+            if path not in self.sse_dict and path not in self.routes:
+                self.sse_dict[path] = func
+                self.sse_methods[path] = methods
+                return func
+            else:
+                raise ValueError("Duplicate Route")
         return decorator
 
     def _serve_static_file(self, client_address, request_route, timestamp, file_path, client_socket):
@@ -76,8 +93,64 @@ class CrudeOil:
                     status_code=str(status_code)))
             client_socket.sendall(response.encode('utf-8'))
 
-    def serve(self, path):
-        return self.routes[path]()
+    def serve(self, path, category):
+        if category == "default":
+            return self.routes[path]()
+
+    def default_routes(self, path, method, client_address, timestamp, request_route):
+        response_json = self.serve(path, "default")
+        if method == 'GET':
+            status_code = response_json["status_code"]
+            status_code_text = self.http_status_codes[status_code]
+            response = f'HTTP/1.1 {status_code} {status_code_text}\r\n'
+            response += f'Content-Type: {response_json["mime"]}\r\n'
+            response += '\r\n'
+            response += str(response_json["payload"])
+            print(self.run_request_log.format(
+                client_ip=client_address[0], 
+                timestamp=timestamp, 
+                request=request_route, 
+                status_code=str(status_code)))
+        else:
+            status_code = 405
+            status_code_text = self.http_status_codes[status_code]
+            response = f'HTTP/1.1 {status_code} {status_code_text}\r\n'
+            response += 'Content-Type: text/html\r\n'
+            response += '\r\n'
+            response += f'<html><body>{status_code} {status_code_text}</body></html>'
+            print(self.run_request_log.format(
+                client_ip=client_address[0], 
+                timestamp=timestamp, 
+                request=request_route, 
+                status_code=str(status_code)))
+        return response
+
+    def sse_routes(self, path, method, client_address, timestamp, request_route):
+        if method == 'GET':
+            status_code = 200
+            status_code_text = self.http_status_codes[status_code]
+            response = f'HTTP/1.1 {status_code} {status_code_text}\r\n'
+            response += f'Content-Type: text/event-stream\r\n'
+            response += f'Cache-Control: no-cache\r\n'
+            response += f'Connection: keep-alive\r\n'
+            response += '\r\n'
+            print(self.run_request_log.format(
+                client_ip=client_address[0], 
+                timestamp=timestamp, 
+                request=request_route, 
+                status_code=str(status_code)))
+        return response
+
+    def sse_longrun(self, client_socket, path):
+        try:
+            sse_generator = self.sse_dict[path]()
+            for item in sse_generator:
+                client_socket.send(item)
+        except BrokenPipeError:
+            pass
+        finally:
+            client_socket.close()
+
 
     def run(self, host='localhost', port=5000, debug=False, conn_backlog=5):
         if debug==True:
@@ -95,42 +168,28 @@ class CrudeOil:
         while True:
             client_socket, client_address = self.server_socket.accept()
             request = client_socket.recv(1024).decode('utf-8')
+            response = ""
             timestamp = datetime.now().strftime("%d/%b/%Y %H:%M:%S")
             request_route = request.split("\n")[0].strip()
             if request:
                 request_line = request.splitlines()[0]
                 method, path, _ = request_line.split()
             
-                if path in self.routes:
+                if path in self.sse_dict:
+                    if method in self.sse_methods[path]:
+                        response = self.sse_routes(path, method, client_address, timestamp, request_route)
+                        client_socket.send(response.encode('utf-8'))
+                        client_thread = threading.Thread(target=self.sse_longrun, args=(client_socket, path, ))
+                        client_thread.start()
+                elif path in self.routes:
                     if method in self.route_methods[path]:
-                        response_json = self.serve(path)
-                        if method == 'GET':
-                            status_code = response_json["status_code"]
-                            status_code_text = self.http_status_codes[status_code]
-                            response = f'HTTP/1.1 {status_code} {status_code_text}\r\n'
-                            response += f'Content-Type: {response_json["mime"]}\r\n'
-                            response += '\r\n'
-                            response += str(response_json["payload"])
-                            print(self.run_request_log.format(
-                                client_ip=client_address[0], 
-                                timestamp=timestamp, 
-                                request=request_route, 
-                                status_code=str(status_code)))
-                    else:
-                        status_code = 405
-                        status_code_text = self.http_status_codes[status_code]
-                        response = f'HTTP/1.1 {status_code} {status_code_text}\r\n'
-                        response += 'Content-Type: text/html\r\n'
-                        response += '\r\n'
-                        response += f'<html><body>{status_code} {status_code_text}</body></html>'
-                        print(self.run_request_log.format(
-                            client_ip=client_address[0], 
-                            timestamp=timestamp, 
-                            request=request_route, 
-                            status_code=str(status_code)))
+                        response = self.default_routes(path, method, client_address, timestamp, request_route)
+                    client_socket.sendall(response.encode('utf-8'))
+                    client_socket.close()
                 elif path.startswith('/static/'):
                     file_path = os.path.join(self.static_folder, path[len('/static/'):])
                     self._serve_static_file(client_address, request_route, timestamp, file_path, client_socket)
+                    client_socket.close()
                 else:
                     status_code = 404
                     status_code_text = self.http_status_codes[status_code]
@@ -144,8 +203,8 @@ class CrudeOil:
                         request=request_route, 
                         status_code=str(status_code)))
 
-            client_socket.sendall(response.encode('utf-8'))
-            client_socket.close()
+                    client_socket.sendall(response.encode('utf-8'))
+                    client_socket.close()
 
 def render_template(template_file, mime='text/html', status_code=500, template_args={}):
     local_crudeoil = CrudeOil(__name__)
