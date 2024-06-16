@@ -8,6 +8,14 @@ import sys
 import os
 from mimetypes import guess_type
 from jinja2 import Environment, FileSystemLoader
+from urllib.parse import urlparse, unquote_plus
+import json
+
+class Request:
+    def __init__(self):
+        self.args = {}
+        self.body = {}
+        self.headers = {}
 
 class CrudeOil:
     def __init__(
@@ -117,6 +125,64 @@ class CrudeOil:
                 else: 
                     return response_json
 
+    def _get_request_var_dict(
+            self,
+            request_args: str | None = None
+        ) -> str:
+        request_var_dict = {}
+        start = 0
+        key = ""
+        curr_closing = ""
+        closings = { "'": "'", '"': '"', "(": ")", "{": "}", "[": "]", "<": ">", "`": "`" }
+        for index in range(len(request_args)):
+            if request_args[index] == "=" and curr_closing == "":
+                key = request_args[start:index]
+                start = index+1
+            elif request_args[index] == "&" and key != "" and curr_closing == "":
+                request_var_dict[key] = request_args[start:index]
+                key=""
+                start = index+1
+            elif request_args[index] in closings and curr_closing == "":
+                if request_args[index-1] == "=":
+                    curr_closing = request_args[index]
+            elif curr_closing != "":
+                if request_args[index] == closings[curr_closing]:
+                    request_var_dict[key] = request_args[start:index+1]
+                    key=""
+                    start = index+1
+                    curr_closing = ""
+        if key != "":
+            request_var_dict[key] = request_args[start:len(request_args)]
+            key=""
+        if "" in request_var_dict:
+            request_var_dict.pop("")
+        return request_var_dict
+
+    def _request_json(
+            self,
+            raw_request: str
+        ) -> dict:
+        request = Request()
+        raw_headers, body = raw_request.split("\r\n\r\n")
+        if body.strip() == "":
+            body = "{}"
+        headers = {}
+        headers["method"], headers["route"], headers["protocol"] = raw_headers.strip().split("\r\n")[0].split(" ")
+        for line in raw_headers.strip().split("\r\n")[1:]:
+            if line.strip() == "":
+                continue
+            key = line.split(": ")[0]
+            val = line.split(": ")[1]
+            #print(key)
+            #print(val)
+            headers[key] = val
+        parsed_url = urlparse(headers["route"])
+        headers["route"] = parsed_url.path
+        query_params = unquote_plus(parsed_url.query)
+        request.args = self._get_request_var_dict(query_params)
+        request.headers = headers
+        request.body = json.loads(body)
+        return request
 
     def _serve_static_file(
         self, 
@@ -154,14 +220,28 @@ class CrudeOil:
                     status_code=str(pnf_resp["status_code"])))
             client_socket.sendall(response.encode('utf-8'))
 
-    def serve(self, path, category):
+    def serve(self, path, request, category):
         if category == "default":
-            return self.routes[path]()
+            return self.routes[path](request)
 
-    def default_routes(self, path, method, client_address, timestamp, request_route):
-        response_json = self.serve(path, "default")
+    def default_routes(self, path, method, client_address, timestamp, request_route, request):
+        response_json = self.serve(path, request, "default")
         response_json = self._response_check(response_json)
         if method == 'GET':
+            status_code = response_json["status_code"]
+            status_code_text = self.http_status_codes[status_code]
+            headers = (
+                f'HTTP/1.1 {status_code} {status_code_text}',
+                f'Content-Type: {response_json["mime"]}'
+            )
+            response = self._build_header(headers)
+            response += str(response_json["payload"])
+            print(self.run_request_log.format(
+                client_ip=client_address[0], 
+                timestamp=timestamp, 
+                request=request_route, 
+                status_code=str(status_code)))
+        elif method == 'POST':
             status_code = response_json["status_code"]
             status_code_text = self.http_status_codes[status_code]
             headers = (
@@ -229,15 +309,17 @@ class CrudeOil:
         print(self.run_info.format(host=host, port=port, debug_state=debug_state))
         while True:
             client_socket, client_address = self.server_socket.accept()
-            request = client_socket.recv(1024).decode('utf-8')
+            raw_request = client_socket.recv(1024).decode('utf-8')
             response = ""
             timestamp = datetime.now().strftime("%d/%b/%Y %H:%M:%S")
-            request_route = request.split("\n")[0].strip()
-            print(request)
+            #print(raw_request)
+            request = self._request_json(raw_request)
+            #print(request)
+            #print(request)
             if request:
-                request_line = request.splitlines()[0]
-                method, path, _ = request_line.split()
-            
+                method = request.headers["method"]
+                path = request.headers["route"]
+                request_route = f'{method} {path} {request.headers["protocol"]}'
                 if path in self.sse_dict:
                     if method in self.sse_methods[path]:
                         response = self.sse_routes(path, method, client_address, timestamp, request_route)
@@ -246,7 +328,7 @@ class CrudeOil:
                         client_thread.start()
                 elif path in self.routes:
                     if method in self.route_methods[path]:
-                        response = self.default_routes(path, method, client_address, timestamp, request_route)
+                        response = self.default_routes(path, method, client_address, timestamp, request_route, request)
                     client_socket.sendall(response.encode('utf-8'))
                     client_socket.close()
                 elif path.startswith(self.static_url_path):
